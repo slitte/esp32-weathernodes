@@ -1,0 +1,30 @@
+[package]
+name = "esp32-weathernodes"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "esp32-weathernodes"
+harness = false
+
+[dependencies]
+# ESP-IDF ecosystem
+esp-idf-sys  = { version = "0.36", features = ["binstart"] }
+esp-idf-hal  = "0.45"
+esp-idf-svc  = { version = "0.51", features = ["experimental"] }
+embedded-svc = "0.28"
+
+# Utilities
+log     = { version = "0.4", features = ["max_level_debug", "release_max_level_info"] }
+anyhow  = { version = "1", features = ["std"] }
+heapless = "0.8"
+
+[build-dependencies]
+embuild = "0.33"
+
+[profile.release]
+opt-level = "s"
+
+[profile.dev]
+opt-level = "z"
+debug     = true

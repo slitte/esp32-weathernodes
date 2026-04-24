@@ -1,0 +1,4 @@
+# Pin this project to the Xtensa-capable Rust fork installed by espup.
+# The toolchain name "esp" is registered by espup in ~/.rustup/toolchains/esp.
+[toolchain]
+channel = "esp"

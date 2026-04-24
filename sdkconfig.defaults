@@ -1,0 +1,6 @@
+# ESP32 WeatherNode – IDF Kconfig overrides
+# Wird von embuild automatisch beim Build eingelesen.
+
+# Der main-Task ruft WiFi-Init auf, die tiefe IDF-Aufrufketten hat.
+# Standard 3584 reicht nicht → Stack-Overflow beim WiFi-Start.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

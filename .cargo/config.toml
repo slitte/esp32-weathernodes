@@ -1,0 +1,29 @@
+[build]
+target = "xtensa-esp32-espidf"
+
+[target.xtensa-esp32-espidf]
+linker = "ldproxy"
+runner = "espflash flash --monitor"
+rustflags = [
+    # Needed for esp-idf-sys to correctly size time_t (64-bit)
+    "--cfg", "espidf_time64",
+]
+
+[unstable]
+build-std = ["std", "panic_abort"]
+
+[env]
+# esp-idf-hal 0.45.x is only compatible up to ESP-IDF 5.4.x.
+# IDF 5.5.x restructured twai_timing_config_t and added sdmmc_host_t fields
+# that the HAL crate doesn't know about yet.
+# embuild will download and manage IDF v5.3.2 inside the cargo target directory.
+# The locally installed ~/esp/esp-idf (v5.5.2) is intentionally NOT used here.
+ESP_IDF_VERSION = { value = "v5.3.2", force = false }
+
+# Arch Linux ships libxml2 2.12+ which changed the SONAME from .so.2 to .so.16.
+# The bundled esp-clang binary requires the old .so.2 and will therefore crash.
+# Solution: point bindgen (used by esp-idf-sys) to the system clang instead.
+# LIBCLANG_PATH – directory containing libclang.so (used by the bindgen crate).
+# CLANG_PATH    – clang binary used for C pre-processing during binding generation.
+LIBCLANG_PATH = { value = "/usr/lib", force = false }
+CLANG_PATH    = { value = "/usr/bin/clang", force = false }
