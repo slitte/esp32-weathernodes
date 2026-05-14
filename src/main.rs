@@ -7,7 +7,11 @@
 //!      • Config found  → measurement mode  (Step 3+)
 //!      • Config absent → AP config portal  (Step 2)
 
-use esp_idf_svc::{eventloop::EspSystemEventLoop, hal::{gpio::AnyIOPin, peripherals::Peripherals}, log::EspLogger};
+use esp_idf_svc::{
+    eventloop::EspSystemEventLoop,
+    hal::{gpio::AnyIOPin, peripherals::Peripherals},
+    log::EspLogger,
+};
 use esp_idf_sys as _;
 
 mod ap_mode;
@@ -26,7 +30,7 @@ fn main() -> anyhow::Result<()> {
     log_wakeup_reason();
 
     let peripherals = Peripherals::take()?;
-    let sysloop     = EspSystemEventLoop::take()?;
+    let sysloop = EspSystemEventLoop::take()?;
 
     match config::load_from_nvs() {
         Ok(Some(cfg)) => {
@@ -35,18 +39,31 @@ fn main() -> anyhow::Result<()> {
                 cfg.device_name, cfg.wifi_ssid, cfg.mqtt_server, cfg.mqtt_port);
             if let Err(e) = cfg.validate() {
                 log::error!(target: TAG, "Config invalid: {e} – starting config portal");
-                ap_mode::run(peripherals.modem, sysloop, peripherals.i2c0)?;
+                ap_mode::run(peripherals.modem, sysloop, peripherals.i2c0, peripherals.adc1)?;
             } else {
-                run_measurement_mode(cfg, peripherals, sysloop);
+                match cfg.setup_state() {
+                    config::SetupState::Complete => {
+                        run_measurement_mode(cfg, peripherals, sysloop);
+                    }
+                    config::SetupState::WifiOnly => {
+                        log::warn!(target: TAG,
+                            "MQTT not configured – starting portal (WiFi-only state)");
+                        ap_mode::run(peripherals.modem, sysloop, peripherals.i2c0, peripherals.adc1)?;
+                    }
+                    config::SetupState::Incomplete => {
+                        // load_from_nvs guarantees wifi_ssid is set; unreachable in practice.
+                        ap_mode::run(peripherals.modem, sysloop, peripherals.i2c0, peripherals.adc1)?;
+                    }
+                }
             }
         }
         Ok(None) => {
             log::warn!(target: TAG, "No config in NVS – starting config portal");
-            ap_mode::run(peripherals.modem, sysloop, peripherals.i2c0)?;
+            ap_mode::run(peripherals.modem, sysloop, peripherals.i2c0, peripherals.adc1)?;
         }
         Err(e) => {
             log::error!(target: TAG, "Config load error: {e} – starting config portal");
-            ap_mode::run(peripherals.modem, sysloop, peripherals.i2c0)?;
+            ap_mode::run(peripherals.modem, sysloop, peripherals.i2c0, peripherals.adc1)?;
         }
     }
 
@@ -57,11 +74,7 @@ fn main() -> anyhow::Result<()> {
 // Mode stubs
 // ---------------------------------------------------------------------------
 
-fn run_measurement_mode(
-    cfg:     config::Config,
-    p:       Peripherals,
-    sysloop: EspSystemEventLoop,
-) -> ! {
+fn run_measurement_mode(cfg: config::Config, p: Peripherals, sysloop: EspSystemEventLoop) -> ! {
     let sleep_min = cfg.sleep_minutes;
     log::info!(target: TAG, "--- Measurement mode (sleep: {sleep_min} min) ---");
 
@@ -69,16 +82,20 @@ fn run_measurement_mode(
     // ADC failure is non-fatal: log the error and continue without battery data.
     // Only GPIO 32–39 are valid ADC1 channels on the ESP32.
     let bat_v: Option<f32> = if cfg.send_battery {
-        use esp_idf_svc::hal::adc::oneshot::{
-            config::{AdcChannelConfig, Calibration},
-            AdcChannelDriver, AdcDriver,
-        };
         use esp_idf_svc::hal::adc::attenuation::DB_11;
+        use esp_idf_svc::hal::adc::oneshot::{
+            AdcChannelDriver, AdcDriver,
+            config::{AdcChannelConfig, Calibration},
+        };
         (|| -> anyhow::Result<f32> {
-            let adc    = AdcDriver::new(p.adc1)?;
+            let adc = AdcDriver::new(p.adc1)?;
             // Calibration::None → read() returns raw 12-bit counts (0–4095).
             // bat_voltage_from_raw() expects this range; Curve/Line would return mV.
-            let ch_cfg = AdcChannelConfig { attenuation: DB_11, calibration: Calibration::None, ..Default::default() };
+            let ch_cfg = AdcChannelConfig {
+                attenuation: DB_11,
+                calibration: Calibration::None,
+                ..Default::default()
+            };
             // Peripheral tokens are distinct zero-sized types in esp-idf-hal –
             // the type system prevents dynamic dispatch without unsafe.
             // Each arm is identical code but a different compile-time pin type.
@@ -91,7 +108,7 @@ fn run_measurement_mode(
                 37 => AdcChannelDriver::new(&adc, p.pins.gpio37, &ch_cfg)?.read()?,
                 38 => AdcChannelDriver::new(&adc, p.pins.gpio38, &ch_cfg)?.read()?,
                 39 => AdcChannelDriver::new(&adc, p.pins.gpio39, &ch_cfg)?.read()?,
-                n  => anyhow::bail!("GPIO{n} is not an ADC1 channel (valid: 32–39)"),
+                n => anyhow::bail!("GPIO{n} is not an ADC1 channel (valid: 32–39)"),
             };
             Ok(sensor::bat_voltage_from_raw(raw))
         })()
@@ -110,18 +127,13 @@ fn run_measurement_mode(
     let sda = unsafe { AnyIOPin::new(cfg.sda_pin as i32) };
     let scl = unsafe { AnyIOPin::new(cfg.scl_pin as i32) };
     let bme_cfg = sensor::Bme280Config {
-        addr:             cfg.bme280_addr,
+        addr: cfg.bme280_addr,
         send_temperature: cfg.send_temperature,
-        send_pressure:    cfg.send_pressure,
-        send_humidity:    cfg.send_humidity,
+        send_pressure: cfg.send_pressure,
+        send_humidity: cfg.send_humidity,
     };
-    let (temp, pres, humi) = match sensor::read_bme280(
-        &bme_cfg,
-        p.i2c0,
-        sda,
-        scl,
-    ) {
-        Ok(v)  => v,
+    let (temp, pres, humi) = match sensor::read_bme280(&bme_cfg, p.i2c0, sda, scl) {
+        Ok(v) => v,
         Err(e) => {
             log::error!(target: TAG, "BME280: {e}");
             go_to_sleep(sleep_min);
@@ -129,21 +141,29 @@ fn run_measurement_mode(
     };
 
     let data = sensor::SensorData {
-        temperature:     temp,
-        pressure:        pres,
-        humidity:        humi,
+        temperature: temp,
+        pressure: pres,
+        humidity: humi,
         battery_voltage: bat_v,
     };
 
     // ── Log sensor readings ───────────────────────────────────────────────────
-    if let Some(t) = data.temperature     { log::info!(target: TAG, "Temperature: {t:.2} °C"); }
-    if let Some(p) = data.pressure        { log::info!(target: TAG, "Pressure:    {p:.2} hPa"); }
-    if let Some(h) = data.humidity        { log::info!(target: TAG, "Humidity:    {h:.2} %"); }
-    if let Some(v) = data.battery_voltage { log::info!(target: TAG, "Battery:     {v:.2} V"); }
+    if let Some(t) = data.temperature {
+        log::info!(target: TAG, "Temperature: {t:.2} °C");
+    }
+    if let Some(p) = data.pressure {
+        log::info!(target: TAG, "Pressure:    {p:.2} hPa");
+    }
+    if let Some(h) = data.humidity {
+        log::info!(target: TAG, "Humidity:    {h:.2} %");
+    }
+    if let Some(v) = data.battery_voltage {
+        log::info!(target: TAG, "Battery:     {v:.2} V");
+    }
 
     // ── WiFi ──────────────────────────────────────────────────────────────────
     let wifi = match network::connect_wifi(&cfg, p.modem, sysloop) {
-        Ok(w)  => w,
+        Ok(w) => w,
         Err(e) => {
             log::error!(target: TAG, "WiFi: {e}");
             go_to_sleep(sleep_min);
@@ -181,21 +201,20 @@ fn go_to_sleep(minutes: u32) -> ! {
 
 fn log_wakeup_reason() {
     use esp_idf_sys::{
-        esp_sleep_get_wakeup_cause,
-        esp_sleep_source_t_ESP_SLEEP_WAKEUP_EXT0     as EXT0,
-        esp_sleep_source_t_ESP_SLEEP_WAKEUP_EXT1     as EXT1,
-        esp_sleep_source_t_ESP_SLEEP_WAKEUP_TIMER    as TIMER,
+        esp_sleep_get_wakeup_cause, esp_sleep_source_t_ESP_SLEEP_WAKEUP_EXT0 as EXT0,
+        esp_sleep_source_t_ESP_SLEEP_WAKEUP_EXT1 as EXT1,
+        esp_sleep_source_t_ESP_SLEEP_WAKEUP_TIMER as TIMER,
         esp_sleep_source_t_ESP_SLEEP_WAKEUP_TOUCHPAD as TOUCH,
-        esp_sleep_source_t_ESP_SLEEP_WAKEUP_ULP      as ULP,
+        esp_sleep_source_t_ESP_SLEEP_WAKEUP_ULP as ULP,
     };
     let reason = unsafe { esp_sleep_get_wakeup_cause() };
     let msg = match reason {
-        EXT0  => "EXT0 (RTC_IO)",
-        EXT1  => "EXT1 (RTC_CNTL)",
+        EXT0 => "EXT0 (RTC_IO)",
+        EXT1 => "EXT1 (RTC_CNTL)",
         TIMER => "deep-sleep timer",
         TOUCH => "touchpad",
-        ULP   => "ULP co-processor",
-        _     => "power-on / undefined",
+        ULP => "ULP co-processor",
+        _ => "power-on / undefined",
     };
     log::info!(target: TAG, "Wakeup: {msg}");
 }

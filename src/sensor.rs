@@ -20,10 +20,10 @@ const TAG: &str = "sensor";
 // ─── Public output ────────────────────────────────────────────────────────────
 
 pub struct SensorData {
-    pub temperature:     Option<f32>,   // °C
-    pub pressure:        Option<f32>,   // hPa
-    pub humidity:        Option<f32>,   // %RH
-    pub battery_voltage: Option<f32>,   // V
+    pub temperature: Option<f32>,     // °C
+    pub pressure: Option<f32>,        // hPa
+    pub humidity: Option<f32>,        // %RH
+    pub battery_voltage: Option<f32>, // V
 }
 
 /// Minimal BME280 configuration, decoupled from the runtime `Config` struct.
@@ -31,10 +31,10 @@ pub struct SensorData {
 /// configuration layer.
 pub struct Bme280Config {
     /// I²C address (0x76 or 0x77).
-    pub addr:             u8,
+    pub addr: u8,
     pub send_temperature: bool,
-    pub send_pressure:    bool,
-    pub send_humidity:    bool,
+    pub send_pressure: bool,
+    pub send_humidity: bool,
 }
 
 // ─── BME280 entry point ───────────────────────────────────────────────────────
@@ -55,8 +55,7 @@ pub fn read_bme280<'d>(
     }
 
     let i2c_cfg = I2cConfig::new().baudrate(400_u32.kHz().into());
-    let mut bus = I2cDriver::new(i2c, sda, scl, &i2c_cfg)
-        .context("I²C init failed")?;
+    let mut bus = I2cDriver::new(i2c, sda, scl, &i2c_cfg).context("I²C init failed")?;
 
     let addr = cfg.addr;
 
@@ -65,15 +64,15 @@ pub fn read_bme280<'d>(
     trigger_forced(&mut bus, addr, cfg).context("BME280 trigger forced mode")?;
     // Worst-case measurement time: 2 ms + 3×2.3 ms ≈ 9 ms; 15 ms is safe.
     FreeRtos::delay_ms(15);
-    let (temp, pres, humi) = raw_and_compensate(&mut bus, addr, &calib, cfg)
-        .context("BME280 raw read")?;
+    let (temp, pres, humi) =
+        raw_and_compensate(&mut bus, addr, &calib, cfg).context("BME280 raw read")?;
 
     log::info!(target: TAG, "BME280: {temp:.2} °C  {pres:.2} hPa  {humi:.2} %");
 
     Ok((
         cfg.send_temperature.then(|| round2(temp)),
-        cfg.send_pressure   .then(|| round2(pres)),
-        cfg.send_humidity   .then(|| round2(humi)),
+        cfg.send_pressure.then(|| round2(pres)),
+        cfg.send_humidity.then(|| round2(humi)),
     ))
 }
 
@@ -110,16 +109,30 @@ fn read_regs(bus: &mut I2cDriver<'_>, addr: u8, reg: u8, buf: &mut [u8]) -> anyh
 // ─── Calibration data ─────────────────────────────────────────────────────────
 
 struct Calib {
-    t1: u16, t2: i16, t3: i16,
-    p1: u16, p2: i16, p3: i16, p4: i16, p5: i16,
-    p6: i16, p7: i16, p8: i16, p9: i16,
-    h1: u8,  h2: i16, h3: u8,  h4: i16, h5: i16, h6: i8,
+    t1: u16,
+    t2: i16,
+    t3: i16,
+    p1: u16,
+    p2: i16,
+    p3: i16,
+    p4: i16,
+    p5: i16,
+    p6: i16,
+    p7: i16,
+    p8: i16,
+    p9: i16,
+    h1: u8,
+    h2: i16,
+    h3: u8,
+    h4: i16,
+    h5: i16,
+    h6: i8,
 }
 
 fn read_calibration(bus: &mut I2cDriver<'_>, addr: u8) -> anyhow::Result<Calib> {
     let mut b1 = [0u8; 24]; // 0x88–0x9F: T1..T3, P1..P9
-    let mut h1 = [0u8; 1];  // 0xA1:      H1
-    let mut b2 = [0u8; 7];  // 0xE1–0xE7: H2..H6
+    let mut h1 = [0u8; 1]; // 0xA1:      H1
+    let mut b2 = [0u8; 7]; // 0xE1–0xE7: H2..H6
 
     read_regs(bus, addr, 0x88, &mut b1)?;
     read_regs(bus, addr, 0xA1, &mut h1)?;
@@ -134,11 +147,11 @@ fn read_calibration(bus: &mut I2cDriver<'_>, addr: u8) -> anyhow::Result<Calib> 
     let h5 = ((b2[5] as i16) << 4) | ((b2[4] as i16) >> 4);
 
     Ok(Calib {
-        t1: u16le(b1[0],  b1[1]),
-        t2: i16le(b1[2],  b1[3]),
-        t3: i16le(b1[4],  b1[5]),
-        p1: u16le(b1[6],  b1[7]),
-        p2: i16le(b1[8],  b1[9]),
+        t1: u16le(b1[0], b1[1]),
+        t2: i16le(b1[2], b1[3]),
+        t3: i16le(b1[4], b1[5]),
+        p1: u16le(b1[6], b1[7]),
+        p2: i16le(b1[8], b1[9]),
         p3: i16le(b1[10], b1[11]),
         p4: i16le(b1[12], b1[13]),
         p5: i16le(b1[14], b1[15]),
@@ -161,7 +174,7 @@ fn trigger_forced(bus: &mut I2cDriver<'_>, addr: u8, cfg: &Bme280Config) -> anyh
     // Temperature must be measured whenever pressure or humidity compensation is needed
     // (the compensation formulas all depend on t_fine from the temperature channel).
     let need_t = cfg.send_temperature || cfg.send_pressure || cfg.send_humidity;
-    let osrs_t: u8 = if need_t            { 0b001 } else { 0 };
+    let osrs_t: u8 = if need_t { 0b001 } else { 0 };
     let osrs_p: u8 = if cfg.send_pressure { 0b001 } else { 0 };
     let osrs_h: u8 = if cfg.send_humidity { 0b001 } else { 0 };
 
@@ -175,15 +188,20 @@ fn trigger_forced(bus: &mut I2cDriver<'_>, addr: u8, cfg: &Bme280Config) -> anyh
 
 // BME280 skipped-channel sentinel values (datasheet §4.2.3).
 const BME280_SKIP_TP: i32 = 0x80000; // press or temp skipped
-const BME280_SKIP_H:  i32 = 0x8000;  // hum skipped
+const BME280_SKIP_H: i32 = 0x8000; // hum skipped
 
-fn raw_and_compensate(bus: &mut I2cDriver<'_>, addr: u8, c: &Calib, cfg: &Bme280Config) -> anyhow::Result<(f32, f32, f32)> {
+fn raw_and_compensate(
+    bus: &mut I2cDriver<'_>,
+    addr: u8,
+    c: &Calib,
+    cfg: &Bme280Config,
+) -> anyhow::Result<(f32, f32, f32)> {
     let mut raw = [0u8; 8]; // 0xF7–0xFE
     read_regs(bus, addr, 0xF7, &mut raw)?;
 
     let adc_p = ((raw[0] as i32) << 12) | ((raw[1] as i32) << 4) | ((raw[2] as i32) >> 4);
     let adc_t = ((raw[3] as i32) << 12) | ((raw[4] as i32) << 4) | ((raw[5] as i32) >> 4);
-    let adc_h = ((raw[6] as i32) <<  8) |  (raw[7] as i32);
+    let adc_h = ((raw[6] as i32) << 8) | (raw[7] as i32);
 
     // Temperature is always measured when we reach here (needed for t_fine).
     let (temp, t_fine) = if adc_t == BME280_SKIP_TP {
@@ -225,9 +243,11 @@ fn compensate_pressure(adc_p: i32, t_fine: f64, c: &Calib) -> f32 {
     let v2 = v2 / 4.0 + c.p4 as f64 * 65536.0;
     let v1 = (c.p3 as f64 * v1 * v1 / 524288.0 + c.p2 as f64 * v1) / 524288.0;
     let v1 = (1.0 + v1 / 32768.0) * c.p1 as f64;
-    if v1 == 0.0 { return 0.0; }
-    let p  = 1048576.0 - adc_p as f64;
-    let p  = (p - v2 / 4096.0) * 6250.0 / v1;
+    if v1 == 0.0 {
+        return 0.0;
+    }
+    let p = 1048576.0 - adc_p as f64;
+    let p = (p - v2 / 4096.0) * 6250.0 / v1;
     let v1 = c.p9 as f64 * p * p / 2147483648.0;
     let v2 = p * c.p8 as f64 / 32768.0;
     // Pa → hPa
@@ -236,11 +256,9 @@ fn compensate_pressure(adc_p: i32, t_fine: f64, c: &Calib) -> f32 {
 
 fn compensate_humidity(adc_h: i32, t_fine: f64, c: &Calib) -> f32 {
     let x = t_fine - 76800.0;
-    let x = (adc_h as f64
-        - (c.h4 as f64 * 64.0 + c.h5 as f64 / 16384.0 * x))
+    let x = (adc_h as f64 - (c.h4 as f64 * 64.0 + c.h5 as f64 / 16384.0 * x))
         * (c.h2 as f64 / 65536.0
-            * (1.0 + c.h6 as f64 / 67108864.0 * x
-                * (1.0 + c.h3 as f64 / 67108864.0 * x)));
+            * (1.0 + c.h6 as f64 / 67108864.0 * x * (1.0 + c.h3 as f64 / 67108864.0 * x)));
     let x = x * (1.0 - c.h1 as f64 * x / 524288.0);
     x.clamp(0.0, 100.0) as f32
 }
@@ -269,7 +287,10 @@ mod tests {
         // raw=2048 → ~2.097 V
         let v = bat_voltage_from_raw(2048);
         let expected = 2048_f32 / 4095.0 * 3.3 * (127_000.0 / 100_000.0);
-        assert!((v - expected).abs() < 0.001, "midscale mismatch: {v} vs {expected}");
+        assert!(
+            (v - expected).abs() < 0.001,
+            "midscale mismatch: {v} vs {expected}"
+        );
     }
 
     #[test]
