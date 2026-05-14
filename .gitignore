@@ -1,3 +1,5 @@
 /target
 .embuild/
 .embuild/
+Arduino/
+CLAUDE.md
