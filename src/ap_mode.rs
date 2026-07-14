@@ -962,13 +962,17 @@ const HTML_FORM: &str = r#"<!DOCTYPE html>
   .confirm-bar .cbtn:hover{background:#155c30}
 </style>
 <script>
+// wifi_ssid/wifi_password use data-field instead of name so they are never
+// picked up by the native /save form submit or /update's FormData - /save_wifi
+// is the only path that may persist WiFi credentials (it tests them first).
+function fld(n){return document.querySelector('[name="'+n+'"],[data-field="'+n+'"]');}
 async function ct(url,fields,sid,bid,cid){
   const btn=document.getElementById(bid),st=document.getElementById(sid);
   if(cid){const c=document.getElementById(cid);if(c)c.style.display='none';}
   btn.disabled=true;st.textContent='Bitte warten\u2026';st.className='st busy';
   try{
     const b=new URLSearchParams();
-    fields.forEach(n=>{const e=document.querySelector('[name='+n+']');if(e)b.append(n,e.value)});
+    fields.forEach(n=>{const e=fld(n);if(e)b.append(n,e.value)});
     const r=await fetch(url,{method:'POST',body:b}),j=await r.json();
     st.textContent=j.temp!==undefined
       ?(j.temp+' \u00b0C \u00b7 '+j.pres+' hPa \u00b7 '+j.humi+' %')
@@ -988,7 +992,7 @@ async function saveWifi(){
   btn.disabled=true;st.textContent='Verbindung wird getestet…';st.className='st busy';
   try{
     const b=new URLSearchParams();
-    b.append('wifi_ssid',document.querySelector('[name=wifi_ssid]').value);
+    b.append('wifi_ssid',fld('wifi_ssid').value);
     b.append('wifi_password',document.getElementById('pw1').value);
     const r=await fetch('/save_wifi',{method:'POST',body:b}),j=await r.json();
     st.textContent=j.msg||(j.ok?'Gespeichert':'Fehler');
@@ -1007,13 +1011,13 @@ window.addEventListener('load',async()=>{
     if(!j.configured)return;
     ['device_name','room','wifi_ssid','mqtt_server','mqtt_port','mqtt_user',
      'mqtt_topic','sleep_minutes','sda_pin','scl_pin','adc_pin'].forEach(n=>{
-      const e=document.querySelector('[name='+n+']');
+      const e=fld(n);
       if(e&&j[n]!==undefined)e.value=j[n];
     });
-    const qs=document.querySelector('[name=mqtt_qos]');
+    const qs=fld('mqtt_qos');
     if(qs&&j.mqtt_qos!==undefined)qs.value=j.mqtt_qos;
     ['send_temperature','send_pressure','send_humidity','send_battery'].forEach(n=>{
-      const e=document.querySelector('[name='+n+']');
+      const e=fld(n);
       if(e&&j[n]!==undefined)e.checked=j[n];
     });
     if(j.wifi_password_saved)
@@ -1028,7 +1032,7 @@ window.addEventListener('load',async()=>{
 function togglePw(id){const e=document.getElementById(id);e.type=e.type==='password'?'text':'password';}
 function setDef(fields){
   fields.forEach(([n,v])=>{
-    const e=document.querySelector('[name='+n+']');
+    const e=fld(n);
     if(!e)return;
     e.type==='checkbox'?e.checked=v:e.value=v;
   });
@@ -1077,13 +1081,13 @@ async function save(bid,sid){
 <div class="card">
   <h2>&#128246; WLAN</h2>
   <label>SSID</label>
-  <input name="wifi_ssid" autocomplete="off">
+  <input data-field="wifi_ssid" autocomplete="off">
   <label>Passwort</label>
   <div class="pw">
-    <input type="password" id="pw1" name="wifi_password" autocomplete="off">
+    <input type="password" id="pw1" data-field="wifi_password" autocomplete="off">
     <button type="button" class="eye" onclick="togglePw('pw1')" title="Passwort anzeigen">&#128065;</button>
   </div>
-  <p class="note" style="margin-top:.5rem">Leer lassen um gespeichertes Passwort zu &uuml;bernehmen. WLAN wird vor dem Speichern getestet.</p>
+  <p class="note" style="margin-top:.5rem">Leer lassen um gespeichertes Passwort zu &uuml;bernehmen. WLAN wird vor dem Speichern getestet und direkt gespeichert &ndash; der gro&szlig;e Button unten speichert nur die &uuml;brigen Einstellungen.</p>
   <div class="br">
     <button type="button" class="dbtn" onclick="setDef([['wifi_ssid',''],['wifi_password','']])">Standard</button>
     <button type="button" id="btn-wifi" class="tbtn" onclick="testWifi()">Verbindung testen</button>
