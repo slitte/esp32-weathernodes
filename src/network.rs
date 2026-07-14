@@ -197,7 +197,7 @@ fn build_payload(device_name: &str, room: &str, data: &SensorData) -> String {
 /// Escape a string so it is safe inside a JSON string literal (RFC 8259 §7).
 /// Handles `\`, `"`, the named escapes, and all other control characters
 /// (U+0000–U+001F) which are forbidden unescaped in JSON.
-fn json_escape(s: &str) -> String {
+pub(crate) fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 4);
     for c in s.chars() {
         match c {

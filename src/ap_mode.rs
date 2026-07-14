@@ -36,6 +36,7 @@ use esp_idf_svc::{
 };
 
 use crate::config::{self, Config};
+use crate::network::json_escape as json_str;
 use crate::sensor;
 
 const TAG: &str = "ap_mode";
@@ -745,22 +746,6 @@ fn get_chip_id() -> String {
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
-/// Escapes a string for safe embedding inside a JSON string literal.
-fn json_str(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 4);
-    for c in s.chars() {
-        match c {
-            '"'  => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c    => out.push(c),
-        }
-    }
-    out
-}
-
 /// Escapes a string for safe embedding inside HTML text content.
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
@@ -1282,6 +1267,14 @@ mod tests {
     #[test]
     fn json_str_escapes_newline() {
         assert_eq!(json_str("a\nb"), r"a\nb");
+    }
+
+    #[test]
+    fn json_str_escapes_control_char() {
+        // json_str is now network::json_escape - must also escape raw control
+        // chars, or a user-submitted device_name containing one would make the
+        // /config JSON response invalid and break frontend JSON.parse.
+        assert_eq!(json_str("\x01"), "\\u0001");
     }
 
     #[test]
