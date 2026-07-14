@@ -61,10 +61,15 @@ pub fn connect_wifi(
     // against the FreeRTOS task watchdog (both ~30 s by default).
     let dhcp_start = std::time::Instant::now();
     loop {
-        let ip = wifi.wifi().sta_netif().get_ip_info()?;
-        if ip.ip != std::net::Ipv4Addr::UNSPECIFIED {
-            log::info!(target: TAG, "WiFi up – IP {}", ip.ip);
-            break;
+        // get_ip_info() can transiently error right after association; treat
+        // that the same as "no lease yet" instead of aborting the retry loop.
+        match wifi.wifi().sta_netif().get_ip_info() {
+            Ok(ip) if ip.ip != std::net::Ipv4Addr::UNSPECIFIED => {
+                log::info!(target: TAG, "WiFi up – IP {}", ip.ip);
+                break;
+            }
+            Ok(_) => {}
+            Err(e) => log::warn!(target: TAG, "get_ip_info (retrying): {e}"),
         }
         if dhcp_start.elapsed() >= Duration::from_secs(10) {
             return Err(anyhow::anyhow!("DHCP timeout (10 s)"));
@@ -197,7 +202,7 @@ fn build_payload(device_name: &str, room: &str, data: &SensorData) -> String {
 /// Escape a string so it is safe inside a JSON string literal (RFC 8259 §7).
 /// Handles `\`, `"`, the named escapes, and all other control characters
 /// (U+0000–U+001F) which are forbidden unescaped in JSON.
-fn json_escape(s: &str) -> String {
+pub(crate) fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 4);
     for c in s.chars() {
         match c {

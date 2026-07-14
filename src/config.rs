@@ -183,9 +183,11 @@ const K_SEND_BAT: &str = "send_bat"; //  8
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Serialises concurrent save_to_nvs() calls.  EspDefaultNvsPartition::take()
+// Serialises all NVS access (reads and writes).  EspDefaultNvsPartition::take()
 // fails if a second handle is requested while the first is still alive, so only
-// one EspNvs instance may exist at a time.
+// one EspNvs instance may exist at a time – load_from_nvs() must take this lock
+// too, not just save_to_nvs(), or a concurrent read can race a concurrent write
+// and fail with a spurious storage error.
 static NVS_LOCK: Mutex<()> = Mutex::new(());
 
 fn open_nvs() -> Result<EspNvs<NvsDefault>, ConfigError> {
@@ -218,6 +220,9 @@ fn set_str(nvs: &mut EspNvs<NvsDefault>, key: &str, val: &str) -> Result<(), Con
 
 /// Load config from NVS.  Returns `Ok(None)` on first boot (no wifi_ssid stored).
 pub fn load_from_nvs() -> Result<Option<Config>, ConfigError> {
+    let _lock = NVS_LOCK
+        .lock()
+        .map_err(|_| ConfigError::Storage("NVS mutex poisoned".into()))?;
     let nvs = open_nvs()?;
 
     let wifi_ssid = match get_str(&nvs, K_WIFI_SSID)? {

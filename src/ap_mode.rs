@@ -36,6 +36,7 @@ use esp_idf_svc::{
 };
 
 use crate::config::{self, Config};
+use crate::network::json_escape as json_str;
 use crate::sensor;
 
 const TAG: &str = "ap_mode";
@@ -263,15 +264,7 @@ pub fn run(modem: Modem, sysloop: EspSystemEventLoop, i2c0: I2C0, adc1: ADC1) ->
     server.fn_handler("/update", Method::Post, |mut req| {
         let body = read_body(&mut req);
         let mut cfg = parse_form(&body);
-        // Restore credentials from NVS that must not be overwritten here.
-        if let Ok(Some(saved)) = config::load_from_nvs() {
-            cfg.wifi_ssid     = saved.wifi_ssid;
-            cfg.wifi_password = saved.wifi_password;
-            // Preserve MQTT password if the user left the field blank.
-            if cfg.mqtt_password.is_empty() && !saved.mqtt_password.is_empty() {
-                cfg.mqtt_password = saved.mqtt_password;
-            }
-        }
+        preserve_credentials(&mut cfg);
         let json = match cfg.validate().and_then(|_| config::save_to_nvs(&cfg)) {
             Ok(_) => r#"{"ok":true,"msg":"Gespeichert"}"#.to_string(),
             Err(e) => format!(r#"{{"ok":false,"msg":"{}"}}"#, json_str(&e.to_string())),
@@ -307,14 +300,7 @@ pub fn run(modem: Modem, sysloop: EspSystemEventLoop, i2c0: I2C0, adc1: ADC1) ->
             && let Some(mut cfg) = guard.take()
         {
             drop(guard); // release before the NVS write
-            // Same WiFi-guard as /update: /save path must not overwrite credentials.
-            if let Ok(Some(saved)) = config::load_from_nvs() {
-                cfg.wifi_ssid     = saved.wifi_ssid;
-                cfg.wifi_password = saved.wifi_password;
-                if cfg.mqtt_password.is_empty() && !saved.mqtt_password.is_empty() {
-                    cfg.mqtt_password = saved.mqtt_password;
-                }
-            }
+            preserve_credentials(&mut cfg);
             if let Err(e) = cfg.validate() {
                 log::error!(target: TAG, "Config ungültig, nicht gespeichert: {e}");
             } else {
@@ -412,9 +398,12 @@ fn test_wifi_connection(
     std::thread::sleep(Duration::from_millis(200));
 
     // Update STA config in-place (APSTA mode stays; AP is unaffected).
+    // auth_method must match connect_wifi() in network.rs (the real boot path) -
+    // otherwise this test can reject credentials that would work fine at boot.
     let sta_cfg = ClientConfiguration {
         ssid: ssid_h,
         password: pass_h,
+        auth_method: AuthMethod::WPA2WPA3Personal,
         ..Default::default()
     };
     let ap_cfg = make_ap_cfg(&guard.ap_ssid);
@@ -742,22 +731,6 @@ fn get_chip_id() -> String {
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
-/// Escapes a string for safe embedding inside a JSON string literal.
-fn json_str(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 4);
-    for c in s.chars() {
-        match c {
-            '"'  => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c    => out.push(c),
-        }
-    }
-    out
-}
-
 /// Escapes a string for safe embedding inside HTML text content.
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
@@ -791,19 +764,20 @@ a{{display:inline-block;margin-top:1rem;padding:.4rem 1.2rem;background:#1558a8;
 
 fn read_body(req: &mut impl embedded_svc::io::Read) -> String {
     // 4 KB cap: the config form is at most ~600 bytes; this prevents heap
-    // exhaustion from oversized or malicious POST bodies.
+    // exhaustion from oversized or malicious POST bodies. Bytes beyond the cap
+    // are still read and discarded (not kept in `out`) rather than left on the
+    // socket - if the connection is kept alive, unread body bytes would
+    // otherwise be parsed as the start of the next request.
     const MAX_BODY: usize = 4096;
     let mut buf = [0u8; 512];
     let mut out = Vec::with_capacity(512);
     loop {
-        let rem = MAX_BODY.saturating_sub(out.len());
-        if rem == 0 {
-            break;
-        }
-        let to_read = buf.len().min(rem);
-        match req.read(&mut buf[..to_read]) {
+        match req.read(&mut buf) {
             Ok(0) | Err(_) => break,
-            Ok(n) => out.extend_from_slice(&buf[..n]),
+            Ok(n) => {
+                let room = MAX_BODY.saturating_sub(out.len());
+                out.extend_from_slice(&buf[..n.min(room)]);
+            }
         }
     }
     String::from_utf8_lossy(&out).into_owned()
@@ -817,6 +791,21 @@ fn parse_kv(body: &str) -> HashMap<String, String> {
         }
     }
     map
+}
+
+/// Restores wifi_ssid/wifi_password from the currently saved NVS config, and
+/// mqtt_password if the submitted value was left blank. /save_wifi is the
+/// only handler allowed to change WiFi credentials; every other write path
+/// (/update, the /save polling loop) must call this before saving so a stale
+/// or blank form submission can't overwrite them.
+fn preserve_credentials(cfg: &mut Config) {
+    if let Ok(Some(saved)) = config::load_from_nvs() {
+        cfg.wifi_ssid = saved.wifi_ssid;
+        cfg.wifi_password = saved.wifi_password;
+        if cfg.mqtt_password.is_empty() && !saved.mqtt_password.is_empty() {
+            cfg.mqtt_password = saved.mqtt_password;
+        }
+    }
 }
 
 fn parse_form(body: &str) -> Config {
@@ -959,13 +948,17 @@ const HTML_FORM: &str = r#"<!DOCTYPE html>
   .confirm-bar .cbtn:hover{background:#155c30}
 </style>
 <script>
+// wifi_ssid/wifi_password use data-field instead of name so they are never
+// picked up by the native /save form submit or /update's FormData - /save_wifi
+// is the only path that may persist WiFi credentials (it tests them first).
+function fld(n){return document.querySelector('[name="'+n+'"],[data-field="'+n+'"]');}
 async function ct(url,fields,sid,bid,cid){
   const btn=document.getElementById(bid),st=document.getElementById(sid);
   if(cid){const c=document.getElementById(cid);if(c)c.style.display='none';}
   btn.disabled=true;st.textContent='Bitte warten\u2026';st.className='st busy';
   try{
     const b=new URLSearchParams();
-    fields.forEach(n=>{const e=document.querySelector('[name='+n+']');if(e)b.append(n,e.value)});
+    fields.forEach(n=>{const e=fld(n);if(e)b.append(n,e.value)});
     const r=await fetch(url,{method:'POST',body:b}),j=await r.json();
     st.textContent=j.temp!==undefined
       ?(j.temp+' \u00b0C \u00b7 '+j.pres+' hPa \u00b7 '+j.humi+' %')
@@ -985,7 +978,7 @@ async function saveWifi(){
   btn.disabled=true;st.textContent='Verbindung wird getestet…';st.className='st busy';
   try{
     const b=new URLSearchParams();
-    b.append('wifi_ssid',document.querySelector('[name=wifi_ssid]').value);
+    b.append('wifi_ssid',fld('wifi_ssid').value);
     b.append('wifi_password',document.getElementById('pw1').value);
     const r=await fetch('/save_wifi',{method:'POST',body:b}),j=await r.json();
     st.textContent=j.msg||(j.ok?'Gespeichert':'Fehler');
@@ -993,7 +986,11 @@ async function saveWifi(){
     if(j.ok){
       document.getElementById('pw1').value='';
       document.getElementById('pw1').placeholder='• gespeichert – leer lassen zum Beibehalten';
-      document.getElementById('mqtt-warning').style.display='none';
+      // Only hide the MQTT warning if MQTT is actually configured - saving
+      // WiFi alone must not make an unconfigured device look fully set up.
+      const mqttSrv=fld('mqtt_server');
+      if(mqttSrv&&mqttSrv.value.trim()!=='')
+        document.getElementById('mqtt-warning').style.display='none';
     }
   }catch(e){st.textContent='Netzwerkfehler';st.className='st fail';}
   btn.disabled=false;
@@ -1004,13 +1001,13 @@ window.addEventListener('load',async()=>{
     if(!j.configured)return;
     ['device_name','room','wifi_ssid','mqtt_server','mqtt_port','mqtt_user',
      'mqtt_topic','sleep_minutes','sda_pin','scl_pin','adc_pin'].forEach(n=>{
-      const e=document.querySelector('[name='+n+']');
+      const e=fld(n);
       if(e&&j[n]!==undefined)e.value=j[n];
     });
-    const qs=document.querySelector('[name=mqtt_qos]');
+    const qs=fld('mqtt_qos');
     if(qs&&j.mqtt_qos!==undefined)qs.value=j.mqtt_qos;
     ['send_temperature','send_pressure','send_humidity','send_battery'].forEach(n=>{
-      const e=document.querySelector('[name='+n+']');
+      const e=fld(n);
       if(e&&j[n]!==undefined)e.checked=j[n];
     });
     if(j.wifi_password_saved)
@@ -1025,7 +1022,7 @@ window.addEventListener('load',async()=>{
 function togglePw(id){const e=document.getElementById(id);e.type=e.type==='password'?'text':'password';}
 function setDef(fields){
   fields.forEach(([n,v])=>{
-    const e=document.querySelector('[name='+n+']');
+    const e=fld(n);
     if(!e)return;
     e.type==='checkbox'?e.checked=v:e.value=v;
   });
@@ -1074,13 +1071,13 @@ async function save(bid,sid){
 <div class="card">
   <h2>&#128246; WLAN</h2>
   <label>SSID</label>
-  <input name="wifi_ssid" autocomplete="off">
+  <input data-field="wifi_ssid" autocomplete="off">
   <label>Passwort</label>
   <div class="pw">
-    <input type="password" id="pw1" name="wifi_password" autocomplete="off">
+    <input type="password" id="pw1" data-field="wifi_password" autocomplete="off">
     <button type="button" class="eye" onclick="togglePw('pw1')" title="Passwort anzeigen">&#128065;</button>
   </div>
-  <p class="note" style="margin-top:.5rem">Leer lassen um gespeichertes Passwort zu &uuml;bernehmen. WLAN wird vor dem Speichern getestet.</p>
+  <p class="note" style="margin-top:.5rem">Leer lassen um gespeichertes Passwort zu &uuml;bernehmen. WLAN wird vor dem Speichern getestet und direkt gespeichert &ndash; der gro&szlig;e Button unten speichert nur die &uuml;brigen Einstellungen.</p>
   <div class="br">
     <button type="button" class="dbtn" onclick="setDef([['wifi_ssid',''],['wifi_password','']])">Standard</button>
     <button type="button" id="btn-wifi" class="tbtn" onclick="testWifi()">Verbindung testen</button>
@@ -1278,7 +1275,15 @@ mod tests {
     }
 
     #[test]
+    fn json_str_escapes_control_char() {
+        // json_str is now network::json_escape - must also escape raw control
+        // chars, or a user-submitted device_name containing one would make the
+        // /config JSON response invalid and break frontend JSON.parse.
+        assert_eq!(json_str("\x01"), "\\u0001");
+    }
+
+    #[test]
     fn html_escape_entities() {
-        assert_eq!(html_escape("<b>&\"x\"</b>"), "&lt;b>&amp;\"x\"&lt;/b>");
+        assert_eq!(html_escape("<b>&\"x\"</b>"), "&lt;b&gt;&amp;\"x\"&lt;/b&gt;");
     }
 }
