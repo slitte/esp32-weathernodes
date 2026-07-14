@@ -779,19 +779,20 @@ a{{display:inline-block;margin-top:1rem;padding:.4rem 1.2rem;background:#1558a8;
 
 fn read_body(req: &mut impl embedded_svc::io::Read) -> String {
     // 4 KB cap: the config form is at most ~600 bytes; this prevents heap
-    // exhaustion from oversized or malicious POST bodies.
+    // exhaustion from oversized or malicious POST bodies. Bytes beyond the cap
+    // are still read and discarded (not kept in `out`) rather than left on the
+    // socket - if the connection is kept alive, unread body bytes would
+    // otherwise be parsed as the start of the next request.
     const MAX_BODY: usize = 4096;
     let mut buf = [0u8; 512];
     let mut out = Vec::with_capacity(512);
     loop {
-        let rem = MAX_BODY.saturating_sub(out.len());
-        if rem == 0 {
-            break;
-        }
-        let to_read = buf.len().min(rem);
-        match req.read(&mut buf[..to_read]) {
+        match req.read(&mut buf) {
             Ok(0) | Err(_) => break,
-            Ok(n) => out.extend_from_slice(&buf[..n]),
+            Ok(n) => {
+                let room = MAX_BODY.saturating_sub(out.len());
+                out.extend_from_slice(&buf[..n.min(room)]);
+            }
         }
     }
     String::from_utf8_lossy(&out).into_owned()
