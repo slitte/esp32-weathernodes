@@ -1286,6 +1286,6 @@ mod tests {
 
     #[test]
     fn html_escape_entities() {
-        assert_eq!(html_escape("<b>&\"x\"</b>"), "&lt;b>&amp;\"x\"&lt;/b>");
+        assert_eq!(html_escape("<b>&\"x\"</b>"), "&lt;b&gt;&amp;\"x\"&lt;/b&gt;");
     }
 }
