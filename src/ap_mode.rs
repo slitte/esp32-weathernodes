@@ -264,15 +264,7 @@ pub fn run(modem: Modem, sysloop: EspSystemEventLoop, i2c0: I2C0, adc1: ADC1) ->
     server.fn_handler("/update", Method::Post, |mut req| {
         let body = read_body(&mut req);
         let mut cfg = parse_form(&body);
-        // Restore credentials from NVS that must not be overwritten here.
-        if let Ok(Some(saved)) = config::load_from_nvs() {
-            cfg.wifi_ssid     = saved.wifi_ssid;
-            cfg.wifi_password = saved.wifi_password;
-            // Preserve MQTT password if the user left the field blank.
-            if cfg.mqtt_password.is_empty() && !saved.mqtt_password.is_empty() {
-                cfg.mqtt_password = saved.mqtt_password;
-            }
-        }
+        preserve_credentials(&mut cfg);
         let json = match cfg.validate().and_then(|_| config::save_to_nvs(&cfg)) {
             Ok(_) => r#"{"ok":true,"msg":"Gespeichert"}"#.to_string(),
             Err(e) => format!(r#"{{"ok":false,"msg":"{}"}}"#, json_str(&e.to_string())),
@@ -308,14 +300,7 @@ pub fn run(modem: Modem, sysloop: EspSystemEventLoop, i2c0: I2C0, adc1: ADC1) ->
             && let Some(mut cfg) = guard.take()
         {
             drop(guard); // release before the NVS write
-            // Same WiFi-guard as /update: /save path must not overwrite credentials.
-            if let Ok(Some(saved)) = config::load_from_nvs() {
-                cfg.wifi_ssid     = saved.wifi_ssid;
-                cfg.wifi_password = saved.wifi_password;
-                if cfg.mqtt_password.is_empty() && !saved.mqtt_password.is_empty() {
-                    cfg.mqtt_password = saved.mqtt_password;
-                }
-            }
+            preserve_credentials(&mut cfg);
             if let Err(e) = cfg.validate() {
                 log::error!(target: TAG, "Config ungültig, nicht gespeichert: {e}");
             } else {
@@ -806,6 +791,21 @@ fn parse_kv(body: &str) -> HashMap<String, String> {
         }
     }
     map
+}
+
+/// Restores wifi_ssid/wifi_password from the currently saved NVS config, and
+/// mqtt_password if the submitted value was left blank. /save_wifi is the
+/// only handler allowed to change WiFi credentials; every other write path
+/// (/update, the /save polling loop) must call this before saving so a stale
+/// or blank form submission can't overwrite them.
+fn preserve_credentials(cfg: &mut Config) {
+    if let Ok(Some(saved)) = config::load_from_nvs() {
+        cfg.wifi_ssid = saved.wifi_ssid;
+        cfg.wifi_password = saved.wifi_password;
+        if cfg.mqtt_password.is_empty() && !saved.mqtt_password.is_empty() {
+            cfg.mqtt_password = saved.mqtt_password;
+        }
+    }
 }
 
 fn parse_form(body: &str) -> Config {
