@@ -61,10 +61,15 @@ pub fn connect_wifi(
     // against the FreeRTOS task watchdog (both ~30 s by default).
     let dhcp_start = std::time::Instant::now();
     loop {
-        let ip = wifi.wifi().sta_netif().get_ip_info()?;
-        if ip.ip != std::net::Ipv4Addr::UNSPECIFIED {
-            log::info!(target: TAG, "WiFi up – IP {}", ip.ip);
-            break;
+        // get_ip_info() can transiently error right after association; treat
+        // that the same as "no lease yet" instead of aborting the retry loop.
+        match wifi.wifi().sta_netif().get_ip_info() {
+            Ok(ip) if ip.ip != std::net::Ipv4Addr::UNSPECIFIED => {
+                log::info!(target: TAG, "WiFi up – IP {}", ip.ip);
+                break;
+            }
+            Ok(_) => {}
+            Err(e) => log::warn!(target: TAG, "get_ip_info (retrying): {e}"),
         }
         if dhcp_start.elapsed() >= Duration::from_secs(10) {
             return Err(anyhow::anyhow!("DHCP timeout (10 s)"));
