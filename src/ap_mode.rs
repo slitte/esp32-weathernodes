@@ -412,9 +412,12 @@ fn test_wifi_connection(
     std::thread::sleep(Duration::from_millis(200));
 
     // Update STA config in-place (APSTA mode stays; AP is unaffected).
+    // auth_method must match connect_wifi() in network.rs (the real boot path) -
+    // otherwise this test can reject credentials that would work fine at boot.
     let sta_cfg = ClientConfiguration {
         ssid: ssid_h,
         password: pass_h,
+        auth_method: AuthMethod::WPA2WPA3Personal,
         ..Default::default()
     };
     let ap_cfg = make_ap_cfg(&guard.ap_ssid);
