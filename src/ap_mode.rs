@@ -986,7 +986,11 @@ async function saveWifi(){
     if(j.ok){
       document.getElementById('pw1').value='';
       document.getElementById('pw1').placeholder='• gespeichert – leer lassen zum Beibehalten';
-      document.getElementById('mqtt-warning').style.display='none';
+      // Only hide the MQTT warning if MQTT is actually configured - saving
+      // WiFi alone must not make an unconfigured device look fully set up.
+      const mqttSrv=fld('mqtt_server');
+      if(mqttSrv&&mqttSrv.value.trim()!=='')
+        document.getElementById('mqtt-warning').style.display='none';
     }
   }catch(e){st.textContent='Netzwerkfehler';st.className='st fail';}
   btn.disabled=false;
