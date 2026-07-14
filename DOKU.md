@@ -537,15 +537,21 @@ Zero-Sized-Types mit je eigenem Compile-Zeit-Typ – dynamische Dispatch ohne
 des Pin-Arguments unterscheidet sich.
 
 **WiFi-Verbindungs-Timeout**
-`BlockingWifi::connect()` hat keinen konfigurierbaren Timeout auf Rust-Ebene.
-Das interne IDF-Timeout gilt. Falls das WLAN nicht erreichbar ist, kann
-der Aufruf sehr lange blockieren, bevor er einen Fehler zurückgibt.
+`connect_wifi()` pollt `wifi.is_connected()` manuell mit einem expliziten
+15-s-Timeout für die Assoziation, gefolgt von einem separaten Poll-Loop mit
+10-s-Timeout auf eine gültige DHCP-Lease (`get_ip_info()` statt des
+blockierenden `wait_netif_up()`, das kein eigenes Timeout kennt). Beide
+Werte sind hardcodiert, nicht konfigurierbar. Ein Knoten, der länger als
+15 s zur Assoziation braucht (z. B. am Rand der AP-Reichweite), scheitert
+mit „WiFi connect timeout (15 s)“ und schläft für den nächsten Zyklus,
+auch wenn er sich mit mehr Zeit noch verbunden hätte.
 
 **Watchdog im WiFi-Polling-Loop**
-Der Polling-Loop in `connect_wifi()` schläft 250 ms pro Iteration; der FreeRTOS-
-Task-Watchdog (Standard 30 s) wird dadurch während des 50-s-Timeouts einmal
-gerissen. Eine Anmerkung im Code erinnert daran, den Watchdog anzupassen,
-falls der Timeout jemals über 30 s angehoben wird.
+Beide Polling-Loops in `connect_wifi()` schlafen 250 ms pro Iteration; der
+FreeRTOS-Task-Watchdog (Standard 30 s) wird dadurch bei 15 s + 10 s = 25 s
+Worst-Case nicht gerissen. Falls einer der beiden Timeouts über sein
+Budget hinaus erhöht wird, muss der Watchdog explizit gefüttert oder
+angepasst werden.
 
 **MQTT-Verbindungs-Thread**
 Der `EspMqttConnection`-Iterator läuft in einem eigenen Thread mit 4 kB Stack.
