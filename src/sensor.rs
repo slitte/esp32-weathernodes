@@ -60,12 +60,31 @@ pub fn read_bme280<'d>(
     let addr = cfg.addr;
 
     let calib = read_calibration(&mut bus, addr).context("BME280 calibration read")?;
-    // Pass cfg so only requested channels are measured.
-    trigger_forced(&mut bus, addr, cfg).context("BME280 trigger forced mode")?;
-    // Worst-case measurement time: 2 ms + 3×2.3 ms ≈ 9 ms; 15 ms is safe.
-    FreeRtos::delay_ms(15);
-    let (temp, pres, humi) =
-        raw_and_compensate(&mut bus, addr, &calib, cfg).context("BME280 raw read")?;
+
+    // A forced measurement can occasionally yield the "channel skipped" sentinel
+    // (0x80000 / 0x8000) in the raw registers, e.g. after a sensor reset or a
+    // corrupted ctrl_meas write.  Without a valid temperature there is no t_fine
+    // and pressure/humidity compensation is meaningless, so the whole sample is
+    // discarded and the measurement is retried.
+    let mut sample = None;
+    for attempt in 1..=BME280_MAX_ATTEMPTS {
+        // Pass cfg so only requested channels are measured.
+        trigger_forced(&mut bus, addr, cfg).context("BME280 trigger forced mode")?;
+        wait_measurement_done(&mut bus, addr).context("BME280 wait for measurement")?;
+        match raw_and_compensate(&mut bus, addr, &calib, cfg).context("BME280 raw read")? {
+            Some(s) => {
+                sample = Some(s);
+                break;
+            }
+            None => log::warn!(
+                target: TAG,
+                "BME280: invalid sample, attempt {attempt}/{BME280_MAX_ATTEMPTS}"
+            ),
+        }
+    }
+    let (temp, pres, humi) = sample.ok_or_else(|| {
+        anyhow::anyhow!("BME280: no valid sample after {BME280_MAX_ATTEMPTS} attempts")
+    })?;
 
     log::info!(target: TAG, "BME280: {temp:.2} °C  {pres:.2} hPa  {humi:.2} %");
 
@@ -184,18 +203,60 @@ fn trigger_forced(bus: &mut I2cDriver<'_>, addr: u8, cfg: &Bme280Config) -> anyh
     Ok(())
 }
 
+// ─── Measurement completion ───────────────────────────────────────────────────
+
+/// Maximum number of forced measurements before giving up on this wake-up.
+const BME280_MAX_ATTEMPTS: u8 = 3;
+
+/// status register (0xF3): bit 3 = measuring, bit 0 = im_update (NVM copy).
+const BME280_REG_STATUS: u8 = 0xF3;
+const BME280_STATUS_BUSY_MASK: u8 = 0b0000_1001;
+
+/// Poll the status register until the forced measurement has finished.
+///
+/// Worst-case measurement time at 1× oversampling is ≈ 9.3 ms; a generous
+/// 100 ms upper bound guards against a sensor that never clears the flag.
+fn wait_measurement_done(bus: &mut I2cDriver<'_>, addr: u8) -> anyhow::Result<()> {
+    const POLL_MS: u32 = 2;
+    const TIMEOUT_MS: u32 = 100;
+
+    // Give the sensor time to latch the mode bits before the first status read.
+    FreeRtos::delay_ms(POLL_MS);
+    let mut waited = POLL_MS;
+    loop {
+        let mut status = [0u8; 1];
+        read_regs(bus, addr, BME280_REG_STATUS, &mut status)?;
+        if status[0] & BME280_STATUS_BUSY_MASK == 0 {
+            return Ok(());
+        }
+        if waited >= TIMEOUT_MS {
+            anyhow::bail!(
+                "measurement did not finish within {TIMEOUT_MS} ms (status=0x{:02x})",
+                status[0]
+            );
+        }
+        FreeRtos::delay_ms(POLL_MS);
+        waited += POLL_MS;
+    }
+}
+
 // ─── Raw read + compensation ──────────────────────────────────────────────────
 
 // BME280 skipped-channel sentinel values (datasheet §4.2.3).
 const BME280_SKIP_TP: i32 = 0x80000; // press or temp skipped
 const BME280_SKIP_H: i32 = 0x8000; // hum skipped
 
+/// Read the raw data registers and run the Bosch compensation.
+///
+/// Returns `Ok(None)` if any *requested* channel (temperature always) holds
+/// its skipped-channel sentinel.  Such a sample carries no usable data and
+/// must not be reported as `0.0`; the caller retries the measurement instead.
 fn raw_and_compensate(
     bus: &mut I2cDriver<'_>,
     addr: u8,
     c: &Calib,
     cfg: &Bme280Config,
-) -> anyhow::Result<(f32, f32, f32)> {
+) -> anyhow::Result<Option<(f32, f32, f32)>> {
     let mut raw = [0u8; 8]; // 0xF7–0xFE
     read_regs(bus, addr, 0xF7, &mut raw)?;
 
@@ -204,25 +265,44 @@ fn raw_and_compensate(
     let adc_h = ((raw[6] as i32) << 8) | (raw[7] as i32);
 
     // Temperature is always measured when we reach here (needed for t_fine).
-    let (temp, t_fine) = if adc_t == BME280_SKIP_TP {
-        (0.0_f32, 0.0_f64)
-    } else {
-        compensate_temperature(adc_t, c)
-    };
+    // A sentinel means the channel was not measured → no t_fine → sample useless.
+    if adc_t == BME280_SKIP_TP {
+        log::warn!(
+            target: TAG,
+            "BME280: temperature channel not measured (raw=0x{adc_t:05x})"
+        );
+        return Ok(None);
+    }
+    if cfg.send_pressure && adc_p == BME280_SKIP_TP {
+        log::warn!(
+            target: TAG,
+            "BME280: pressure channel not measured (raw=0x{adc_p:05x})"
+        );
+        return Ok(None);
+    }
+    if cfg.send_humidity && adc_h == BME280_SKIP_H {
+        log::warn!(
+            target: TAG,
+            "BME280: humidity channel not measured (raw=0x{adc_h:04x})"
+        );
+        return Ok(None);
+    }
 
-    let pres = if cfg.send_pressure && adc_p != BME280_SKIP_TP {
+    let (temp, t_fine) = compensate_temperature(adc_t, c);
+
+    let pres = if cfg.send_pressure {
         compensate_pressure(adc_p, t_fine, c)
     } else {
         0.0
     };
 
-    let humi = if cfg.send_humidity && adc_h != BME280_SKIP_H {
+    let humi = if cfg.send_humidity {
         compensate_humidity(adc_h, t_fine, c)
     } else {
         0.0
     };
 
-    Ok((temp, pres, humi))
+    Ok(Some((temp, pres, humi)))
 }
 
 // ─── Compensation formulas (Bosch BME280 datasheet §4.2.3, float variant) ─────
