@@ -321,14 +321,20 @@ ohne externen Sensor-Crate.
    ├─ 0xF2 (ctrl_hum)  → osrs_h  (0 oder 001b)
    └─ 0xF4 (ctrl_meas) → osrs_t | osrs_p | mode=01
 
-3. Warten: 15 ms (konservativ, Worst-Case ≈ 9 ms bei 1×-Oversampling)
+3. Warten: Status-Register 0xF3 pollen (alle 2 ms), bis Bit 3 (measuring)
+   und Bit 0 (im_update) gelöscht sind. Timeout 100 ms → Fehler.
+   (Worst-Case-Messdauer ≈ 9 ms bei 1×-Oversampling)
 
 4. Rohdaten lesen: 0xF7–0xFE (8 Bytes)
    ├─ [0..2] → adc_P (20 Bit)
    ├─ [3..5] → adc_T (20 Bit)
    └─ [6..7] → adc_H (16 Bit)
 
-5. Kompensation (Bosch-Formeln, Float-Variante, Datenblatt §4.2.3)
+5. Plausibilität: enthält ein angeforderter Kanal (Temperatur immer) den
+   Sentinel-Wert (siehe unten), ist die Probe ungültig → zurück zu Schritt 2.
+   Maximal 3 Versuche, danach Fehler → `go_to_sleep()`.
+
+6. Kompensation (Bosch-Formeln, Float-Variante, Datenblatt §4.2.3)
    ├─ compensate_temperature() → (temp °C, t_fine)
    ├─ compensate_pressure(t_fine) → hPa
    └─ compensate_humidity(t_fine) → %RH
@@ -362,8 +368,12 @@ Sind alle drei BME280-Flags `false`, wird der I²C-Bus gar nicht erst geöffnet.
 | Temperatur / Druck (übersprungen) | `0x80000` |
 | Feuchte (übersprungen) | `0x8000` |
 
-Diese werden erkannt und führen dazu, dass die Kompensation für den jeweiligen
-Kanal übersprungen wird.
+Ein Sentinel in einem angeforderten Kanal macht die gesamte Probe ungültig.
+Insbesondere die Temperatur: ohne gültigen `adc_T` gibt es kein `t_fine`, und
+die Druck-/Feuchte-Kompensation würde mit `t_fine = 0` grob falsche Werte
+liefern (Druck deutlich daneben, Feuchte um 1–2 %RH verschoben). Früher wurde
+in diesem Fall `0.0 °C` als gültiger Messwert veröffentlicht; jetzt wird die
+Messung bis zu 3× wiederholt und andernfalls als Fehler behandelt.
 
 ---
 
